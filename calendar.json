@@ -1,0 +1,51 @@
+{
+  "owner": "you",
+  "timezone": "local",
+  "working_hours": {
+    "start": "09:00",
+    "end": "17:00"
+  },
+  "slot_minutes": 30,
+  "events": [
+    {
+      "id": "evt-seed01",
+      "person": "Team",
+      "date": "2026-10-19",
+      "start": "09:00",
+      "end": "10:00",
+      "title": "Team sync"
+    },
+    {
+      "id": "evt-seed02",
+      "person": "Priya",
+      "date": "2026-10-20",
+      "start": "10:00",
+      "end": "11:00",
+      "title": "1:1 Priya"
+    },
+    {
+      "id": "evt-seed03",
+      "person": "Self",
+      "date": "2026-10-21",
+      "start": "14:00",
+      "end": "16:00",
+      "title": "Focus block"
+    },
+    {
+      "id": "evt-seed04",
+      "person": "Team",
+      "date": "2026-10-22",
+      "start": "09:30",
+      "end": "10:00",
+      "title": "Standup"
+    },
+    {
+      "id": "evt-seed05",
+      "person": "Team",
+      "date": "2026-10-23",
+      "start": "15:00",
+      "end": "16:00",
+      "title": "Retro"
+    }
+  ]
+}

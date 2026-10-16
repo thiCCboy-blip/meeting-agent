@@ -1,0 +1,3 @@
+# The agent and tools use only the Python standard library.
+# Nothing is required to run it. pytest is only needed for the test suite.
+pytest>=7.0
