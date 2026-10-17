@@ -144,3 +144,35 @@ Ubuntu and Windows**.
 > is published as its own repository. If it stays a subfolder of a larger repo,
 > move `.github/workflows/ci.yml` to that repo's root and add
 > `working-directory: meeting-agent` to each step.
+
+## MCP server
+
+`mcp_server.py` exposes the same two calendar tools over the
+[Model Context Protocol](https://modelcontextprotocol.io), so a chat client can
+read and book the calendar directly. It implements stdio JSON-RPC by hand with
+only the standard library — no `mcp` package to install.
+
+```bash
+python mcp_server.py
+```
+
+Tools: `check_calendar`, `book_slot` — identical behaviour to the agent, including
+the never-double-book rule (enforced in `calendar_store.book_slot`).
+
+Register it with any MCP client (opencode, Claude Desktop, …). Example for
+opencode's `opencode.json`:
+
+```json
+{
+  "mcp": {
+    "calendar-mcp": {
+      "type": "local",
+      "command": ["python", "meeting-agent/mcp_server.py"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Then a normal chat request like *"Book 30 minutes with Sam next Tuesday at 10:00"*
+makes the client call `check_calendar` and `book_slot` on this server.
