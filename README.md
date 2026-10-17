@@ -1,6 +1,6 @@
 # Meeting-booking agent
 
-[![CI](https://github.com/you/meeting-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/you/meeting-agent/actions/workflows/ci.yml)
+[![CI](https://github.com/thiCCboy-blip/meeting-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/thiCCboy-blip/meeting-agent/actions/workflows/ci.yml)
 
 A tool-using agent that books meetings from plain-English requests against a
 fake calendar stored in `calendar.json`. It exposes two tools to the model and
@@ -14,7 +14,7 @@ The agent and tools use only the Python standard library. It runs on any
 OpenAI-compatible chat API and defaults to a **free** provider (Groq).
 
 > **Resume line:** Built a tool-using agent that books meetings from plain-English
-> requests with zero double-bookings in testing · github.com/you/meeting-agent
+> requests with zero double-bookings in testing · github.com/thiCCboy-blip/meeting-agent
 
 ## Quick start
 
