@@ -13,8 +13,23 @@ enforces a hard **never-double-book** rule in code.
 The agent and tools use only the Python standard library. It runs on any
 OpenAI-compatible chat API and defaults to a **free** provider (Groq).
 
-> **Resume line:** Built a tool-using agent that books meetings from plain-English
-> requests with zero double-bookings in testing · github.com/thiCCboy-blip/meeting-agent
+## What makes this different
+
+Most "booking agent" demos check-then-write, so two concurrent bookings silently
+double-book. Here the guarantee is **race-safe**, not just prompt-level:
+
+- **Overlap prevention in code** — `book_slot` re-reads every event and refuses
+  overlaps; the model cannot talk its way past it.
+- **Race-safe by construction** — the read-check-write runs under a cross-process
+  file lock with atomic writes (`os.replace`), so parallel agents cannot both claim
+  a slot. Proven by concurrency tests that fire 24 threads and 8 OS processes at the
+  *same* slot and assert exactly one winner.
+- **Agent behaviour is tested** — with a mocked chat API, the loop is shown to
+  inspect the calendar before booking and to fail safe when it tries to double-book.
+
+> **Resume line:** Built a race-safe, tool-using meeting agent that books from
+> plain-English requests — zero double-bookings, holding under concurrent bookings ·
+> github.com/thiCCboy-blip/meeting-agent
 
 ## Quick start
 
@@ -72,9 +87,10 @@ committed or shared, rotate it.
 
 1. `agent.py` sends the request plus JSON tool schemas to the chat API.
 2. The model calls `check_calendar`, receives busy/free data, and chooses a slot.
-3. It calls `book_slot`, which **re-reads the calendar and refuses overlaps** —
-   the no-double-book rule lives in `calendar_store.book_slot`, not in the prompt,
-   so a misbehaving model still cannot create a conflict.
+3. It calls `book_slot`, which takes a cross-process lock, **re-reads the calendar,
+   and refuses overlaps**, then writes atomically — the no-double-book rule lives in
+   `calendar_store.book_slot`, not in the prompt, so neither a misbehaving model nor
+   a concurrent agent can create a conflict.
 4. The loop repeats until the model replies without a tool call, then prints a
    confirmation. It stops after `MAX_STEPS` to avoid runaway loops.
 
@@ -86,7 +102,7 @@ never goes stale.
 
 ```
 $ python -m pytest
-11 passed
+14 passed
 ```
 
 - `tests/test_calendar_store.py` — the double-book rule (identical and partial
@@ -95,6 +111,9 @@ $ python -m pytest
 - `tests/test_agent_loop.py` — drives `run_agent` with a **mocked chat API**:
   the agent inspects the calendar before booking, **cannot double-book even when
   told to**, and the loop terminates at `MAX_STEPS`.
+- `tests/test_concurrency.py` — the race-safety guarantee: 24 threads and 8
+  separate OS processes all race for one slot; exactly one wins, and no lock or
+  temp files are left behind.
 
 ## Continuous integration
 

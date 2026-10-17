@@ -8,13 +8,20 @@ The no-double-booking rule is enforced *here*, in code -- not only in the
 prompt. `book_slot` re-checks every existing event before writing, so even a
 misbehaving model cannot create an overlapping booking.
 
+Bookings are also race-safe: the read-check-write in `book_slot` runs under a
+cross-process file lock and writes atomically, so concurrent agents cannot both
+claim the same slot.
+
 All functions accept an optional `path` so tests can run against a temp file.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import date as _date
 from datetime import datetime, timedelta
 from datetime import time as _time
@@ -27,6 +34,12 @@ WORK_START = _time(9, 0)
 WORK_END = _time(17, 0)
 SLOT_MINUTES = 30
 WEEKDAYS = {0, 1, 2, 3, 4}  # Monday-Friday
+
+# Booking lock tuning.
+LOCK_SUFFIX = ".lock"
+LOCK_TIMEOUT = 15.0  # seconds to wait for the booking lock before giving up
+LOCK_POLL = 0.02  # seconds between acquisition attempts
+LOCK_STALE = 30.0  # a lock older than this is treated as abandoned
 
 DEFAULT = {
     "owner": "you",
@@ -51,7 +64,54 @@ def load(path=None) -> dict:
 
 
 def save(data: dict, path=None) -> None:
-    _path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+    """Write the calendar atomically: temp file in the same dir, then os.replace.
+
+    os.replace is atomic on both Windows and POSIX, so readers never see a
+    half-written file and concurrent writers never interleave bytes.
+    """
+    target = _path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, target)
+
+
+@contextmanager
+def _file_lock(path=None):
+    """Cross-process advisory lock via exclusive creation of ``<path>.lock``.
+
+    Serializes the read-check-write in ``book_slot`` so two callers (threads or
+    separate processes) cannot both observe the same free slot and both book it.
+    Stale locks left by a crashed process are cleaned up after ``LOCK_STALE``.
+    """
+    lock_path = Path(f"{_path(path)}{LOCK_SUFFIX}")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + LOCK_TIMEOUT
+    handle = None
+    while handle is None:
+        try:
+            handle = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except (FileExistsError, PermissionError):
+            # Windows raises PermissionError (not FileExistsError) when the lock
+            # is already held; treat both as "someone else has the lock".
+            try:
+                if time.time() - lock_path.stat().st_mtime > LOCK_STALE:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+            except FileNotFoundError:
+                continue
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"could not acquire calendar lock: {lock_path}")
+            time.sleep(LOCK_POLL)
+    try:
+        os.write(handle, f"{os.getpid()}\n".encode())
+        yield
+    finally:
+        os.close(handle)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _parse_date(value) -> _date:
@@ -150,8 +210,10 @@ def book_slot(person, date, start, duration_minutes=30, title=None, path=None) -
     """Book a slot. Returns {"ok": True, ...} or {"ok": False, "error": ...}.
 
     Refuses to double-book: any overlap with an existing event is rejected.
+    The read-check-write runs under a file lock, so concurrent callers cannot
+    both book the same slot -- the "zero double-bookings" guarantee holds even
+    when many agents hit the calendar at once.
     """
-    data = load(path)
     try:
         day = _parse_date(date)
         start_time = _parse_time(start)
@@ -174,30 +236,33 @@ def book_slot(person, date, start, duration_minutes=30, title=None, path=None) -
     if start_time < WORK_START or end_dt > _dt(day, WORK_END) or end_dt.date() != day:
         return {"ok": False, "error": "slot falls outside working hours 09:00-17:00"}
 
-    for busy_start, busy_end, ev in _busy_for_day(data, day):
-        if _overlap(start_dt, end_dt, busy_start, busy_end):
-            return {
-                "ok": False,
-                "error": "double-booking blocked: slot overlaps an existing event",
-                "conflict": {
-                    "person": ev.get("person"),
-                    "start": busy_start.strftime("%H:%M"),
-                    "end": busy_end.strftime("%H:%M"),
-                    "title": ev.get("title"),
-                },
-            }
+    with _file_lock(path):
+        data = load(path)
+        for busy_start, busy_end, ev in _busy_for_day(data, day):
+            if _overlap(start_dt, end_dt, busy_start, busy_end):
+                return {
+                    "ok": False,
+                    "error": "double-booking blocked: slot overlaps an existing event",
+                    "conflict": {
+                        "person": ev.get("person"),
+                        "start": busy_start.strftime("%H:%M"),
+                        "end": busy_end.strftime("%H:%M"),
+                        "title": ev.get("title"),
+                    },
+                }
 
-    event = {
-        "id": f"evt-{uuid.uuid4().hex[:8]}",
-        "person": person,
-        "date": day.isoformat(),
-        "start": start_dt.strftime("%H:%M"),
-        "end": end_dt.strftime("%H:%M"),
-        "title": title or f"Meeting with {person}",
-    }
-    data["events"].append(event)
-    data["events"].sort(key=lambda item: (item["date"], item["start"]))
-    save(data, path)
+        event = {
+            "id": f"evt-{uuid.uuid4().hex[:8]}",
+            "person": person,
+            "date": day.isoformat(),
+            "start": start_dt.strftime("%H:%M"),
+            "end": end_dt.strftime("%H:%M"),
+            "title": title or f"Meeting with {person}",
+        }
+        data["events"].append(event)
+        data["events"].sort(key=lambda item: (item["date"], item["start"]))
+        save(data, path)
+
     return {
         "ok": True,
         "booked": event,
