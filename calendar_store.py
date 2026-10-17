@@ -12,6 +12,12 @@ Bookings are also race-safe: the read-check-write in `book_slot` runs under a
 cross-process file lock and writes atomically, so concurrent agents cannot both
 claim the same slot.
 
+Times are timezone-aware (IANA names via `zoneinfo`). The calendar has a home
+timezone that defines its working hours; events may carry their own timezone;
+`book_slot` interprets its `date`/`start` in a caller-supplied timezone. Overlap
+detection compares absolute instants, so an event in one zone correctly blocks a
+matching instant in another (including across DST changes).
+
 All functions accept an optional `path` so tests can run against a temp file.
 """
 
@@ -26,6 +32,7 @@ from datetime import date as _date
 from datetime import datetime, timedelta
 from datetime import time as _time
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 BASE_DIR = Path(__file__).resolve().parent
 CALENDAR_PATH = BASE_DIR / "calendar.json"
@@ -34,6 +41,7 @@ WORK_START = _time(9, 0)
 WORK_END = _time(17, 0)
 SLOT_MINUTES = 30
 WEEKDAYS = {0, 1, 2, 3, 4}  # Monday-Friday
+DEFAULT_TZ = "UTC"
 
 # Booking lock tuning.
 LOCK_SUFFIX = ".lock"
@@ -43,7 +51,7 @@ LOCK_STALE = 30.0  # a lock older than this is treated as abandoned
 
 DEFAULT = {
     "owner": "you",
-    "timezone": "local",
+    "timezone": DEFAULT_TZ,
     "working_hours": {"start": "09:00", "end": "17:00"},
     "slot_minutes": SLOT_MINUTES,
     "events": [],
@@ -73,7 +81,18 @@ def save(data: dict, path=None) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, target)
+    # On Windows another process may briefly hold the target (indexer, AV), so
+    # retry the replace a few times before giving up.
+    last_error: OSError | None = None
+    for _ in range(5):
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError as exc:  # pragma: no cover - timing dependent
+            last_error = exc
+            time.sleep(0.02)
+    tmp.unlink(missing_ok=True)
+    raise last_error if last_error else OSError("failed to write calendar")
 
 
 @contextmanager
@@ -114,6 +133,22 @@ def _file_lock(path=None):
             pass
 
 
+def _get_tz(name: str) -> ZoneInfo:
+    """Resolve an IANA timezone name, raising ValueError if unknown."""
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
+        raise ValueError(f"unknown timezone: {name!r}") from exc
+
+
+def _home_tz(data: dict) -> ZoneInfo:
+    """The calendar's home timezone (falls back to UTC if unset/invalid)."""
+    try:
+        return _get_tz(data.get("timezone") or DEFAULT_TZ)
+    except ValueError:
+        return ZoneInfo(DEFAULT_TZ)
+
+
 def _parse_date(value) -> _date:
     if isinstance(value, _date):
         return value
@@ -126,48 +161,69 @@ def _parse_time(value) -> _time:
     return datetime.strptime(str(value), "%H:%M").time()
 
 
-def _dt(day: _date, t: _time) -> datetime:
-    return datetime.combine(day, t)
-
-
 def _overlap(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime) -> bool:
     return a_start < b_end and b_start < a_end
 
 
-def _interval(ev: dict):
+def _event_interval(ev: dict, home: ZoneInfo):
+    """Return the event's (start, end) as timezone-aware datetimes."""
     day = _parse_date(ev["date"])
-    return day, _dt(day, _parse_time(ev["start"])), _dt(day, _parse_time(ev["end"]))
+    tz = _get_tz(ev["timezone"]) if ev.get("timezone") else home
+    start = datetime.combine(day, _parse_time(ev["start"]), tzinfo=tz)
+    end = datetime.combine(day, _parse_time(ev["end"]), tzinfo=tz)
+    return start, end
 
 
-def _busy_for_day(data: dict, day: _date):
+def _busy_for_day(data: dict, day: _date, home: ZoneInfo):
+    """Events whose start falls on `day` in the home timezone."""
     out = []
     for ev in data["events"]:
-        ev_day, start, end = _interval(ev)
-        if ev_day == day:
+        start, end = _event_interval(ev, home)
+        if start.astimezone(home).date() == day:
             out.append((start, end, ev))
     out.sort(key=lambda item: item[0])
     return out
 
 
-def free_slots(day, path=None, slot_minutes: int = SLOT_MINUTES) -> list[str]:
-    """Return the start times ("HH:MM") of free aligned slots on `day`."""
+def free_slots(day, path=None, slot_minutes: int = SLOT_MINUTES, timezone=None) -> list[str]:
+    """Start times ("HH:MM") of free aligned slots on `day`.
+
+    Slots are aligned to the calendar's home timezone; pass `timezone` to render
+    them in another zone.
+    """
     data = load(path)
-    busy = [(start, end) for start, end, _ in _busy_for_day(data, _parse_date(day))]
+    home = _home_tz(data)
+    out_tz = _get_tz(timezone) if timezone else home
+    day = _parse_date(day)
+
+    busy = [(start, end) for start, end, _ in _busy_for_day(data, day, home)]
     slots: list[str] = []
-    cursor = _dt(_parse_date(day), WORK_START)
-    day_end = _dt(_parse_date(day), WORK_END)
-    while cursor + timedelta(minutes=slot_minutes) <= day_end:
-        nxt = cursor + timedelta(minutes=slot_minutes)
+    cursor = datetime.combine(day, WORK_START, tzinfo=home)
+    limit = datetime.combine(day, WORK_END, tzinfo=home)
+    step = timedelta(minutes=slot_minutes)
+    while cursor + step <= limit:
+        nxt = cursor + step
         if not any(_overlap(cursor, nxt, s, e) for s, e in busy):
-            slots.append(cursor.strftime("%H:%M"))
+            slots.append(cursor.astimezone(out_tz).strftime("%H:%M"))
         cursor = nxt
     return slots
 
 
-def check_calendar(start_date=None, end_date=None, path=None) -> dict:
-    """List busy events and free slots for each day in [start_date, end_date]."""
+def check_calendar(start_date=None, end_date=None, timezone=None, path=None) -> dict:
+    """List busy events and free slots for each day in [start_date, end_date].
+
+    Times are reported in the calendar's home timezone by default; pass
+    `timezone` to render them in another zone.
+    """
     data = load(path)
-    start = _parse_date(start_date) if start_date else _date.today()
+    home = _home_tz(data)
+    try:
+        out_tz = _get_tz(timezone) if timezone else home
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    today = datetime.now(home).date()
+    start = _parse_date(start_date) if start_date else today
     end = _parse_date(end_date) if end_date else start
     if end < start:
         return {"ok": False, "error": "end_date is before start_date"}
@@ -186,34 +242,45 @@ def check_calendar(start_date=None, end_date=None, path=None) -> dict:
                 "busy": [
                     {
                         "person": ev.get("person"),
-                        "start": start_dt.strftime("%H:%M"),
-                        "end": end_dt.strftime("%H:%M"),
+                        "start": start_dt.astimezone(out_tz).strftime("%H:%M"),
+                        "end": end_dt.astimezone(out_tz).strftime("%H:%M"),
+                        "date": start_dt.astimezone(out_tz).date().isoformat(),
                         "title": ev.get("title"),
                     }
-                    for start_dt, end_dt, ev in _busy_for_day(data, day)
+                    for start_dt, end_dt, ev in _busy_for_day(data, day, home)
                 ],
-                "free_slots": free_slots(day, path) if working else [],
+                "free_slots": free_slots(day, path, timezone=timezone) if working else [],
             }
         )
         day += timedelta(days=1)
 
     return {
         "ok": True,
-        "today": _date.today().isoformat(),
+        "today": today.isoformat(),
+        "timezone": out_tz.key,
+        "home_timezone": home.key,
         "working_hours": data.get("working_hours", {"start": "09:00", "end": "17:00"}),
         "slot_minutes": SLOT_MINUTES,
         "days": days,
     }
 
 
-def book_slot(person, date, start, duration_minutes=30, title=None, path=None) -> dict:
+def book_slot(
+    person, date, start, duration_minutes=30, title=None, timezone=None, path=None
+) -> dict:
     """Book a slot. Returns {"ok": True, ...} or {"ok": False, "error": ...}.
 
-    Refuses to double-book: any overlap with an existing event is rejected.
+    `date` and `start` are interpreted in `timezone` (default: the calendar's
+    home timezone). Working hours are validated in the home timezone. Any overlap
+    with an existing event -- even one in a different timezone -- is rejected.
     The read-check-write runs under a file lock, so concurrent callers cannot
-    both book the same slot -- the "zero double-bookings" guarantee holds even
-    when many agents hit the calendar at once.
+    both book the same slot.
     """
+    try:
+        input_tz = _get_tz(timezone) if timezone else None
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
     try:
         day = _parse_date(date)
         start_time = _parse_time(start)
@@ -223,30 +290,51 @@ def book_slot(person, date, start, duration_minutes=30, title=None, path=None) -
 
     if duration <= 0:
         return {"ok": False, "error": "duration_minutes must be positive"}
-    if day.weekday() not in WEEKDAYS:
-        return {
-            "ok": False,
-            "error": f"{day.isoformat()} is a {day.strftime('%A')}; working days are Mon-Fri",
-        }
-    if day < _date.today():
-        return {"ok": False, "error": "cannot book a slot in the past"}
-
-    start_dt = _dt(day, start_time)
-    end_dt = start_dt + timedelta(minutes=duration)
-    if start_time < WORK_START or end_dt > _dt(day, WORK_END) or end_dt.date() != day:
-        return {"ok": False, "error": "slot falls outside working hours 09:00-17:00"}
 
     with _file_lock(path):
         data = load(path)
-        for busy_start, busy_end, ev in _busy_for_day(data, day):
+        home = _home_tz(data)
+        tz = input_tz or home
+
+        start_dt = datetime.combine(day, start_time, tzinfo=tz)
+        end_dt = start_dt + timedelta(minutes=duration)
+        home_start = start_dt.astimezone(home)
+        home_end = end_dt.astimezone(home)
+
+        if home_start.weekday() not in WEEKDAYS:
+            return {
+                "ok": False,
+                "error": (
+                    f"{home_start.date().isoformat()} is a {home_start.strftime('%A')} "
+                    f"in {home.key}; working days are Mon-Fri"
+                ),
+            }
+        if (
+            home_start.time() < WORK_START
+            or home_end.time() > WORK_END
+            or home_start.date() != home_end.date()
+        ):
+            return {
+                "ok": False,
+                "error": (
+                    f"slot falls outside working hours 09:00-17:00 ({home.key}); "
+                    f"that is {home_start.strftime('%H:%M')}-{home_end.strftime('%H:%M')} there"
+                ),
+            }
+        if start_dt <= datetime.now(tz=tz):
+            return {"ok": False, "error": "cannot book a slot in the past"}
+
+        for ev in data["events"]:
+            busy_start, busy_end = _event_interval(ev, home)
             if _overlap(start_dt, end_dt, busy_start, busy_end):
                 return {
                     "ok": False,
                     "error": "double-booking blocked: slot overlaps an existing event",
                     "conflict": {
                         "person": ev.get("person"),
-                        "start": busy_start.strftime("%H:%M"),
-                        "end": busy_end.strftime("%H:%M"),
+                        "start": busy_start.astimezone(tz).strftime("%H:%M"),
+                        "end": busy_end.astimezone(tz).strftime("%H:%M"),
+                        "timezone": tz.key,
                         "title": ev.get("title"),
                     },
                 }
@@ -254,20 +342,23 @@ def book_slot(person, date, start, duration_minutes=30, title=None, path=None) -
         event = {
             "id": f"evt-{uuid.uuid4().hex[:8]}",
             "person": person,
-            "date": day.isoformat(),
-            "start": start_dt.strftime("%H:%M"),
-            "end": end_dt.strftime("%H:%M"),
+            "date": home_start.date().isoformat(),
+            "start": home_start.strftime("%H:%M"),
+            "end": home_end.strftime("%H:%M"),
+            "timezone": home.key,
             "title": title or f"Meeting with {person}",
         }
         data["events"].append(event)
         data["events"].sort(key=lambda item: (item["date"], item["start"]))
         save(data, path)
 
-    return {
-        "ok": True,
-        "booked": event,
-        "message": (
-            f"Booked {duration} min with {person} on {day.strftime('%A')} "
-            f"{day.isoformat()} {event['start']}-{event['end']}."
-        ),
-    }
+    message = (
+        f"Booked {duration} min with {person} on {home_start.strftime('%A')} "
+        f"{event['date']} {event['start']}-{event['end']} ({home.key})."
+    )
+    result = {"ok": True, "booked": event, "message": message}
+    if tz.key != home.key:
+        result["requested_time"] = (
+            f"{start_dt.strftime('%Y-%m-%d %H:%M')}-{end_dt.strftime('%H:%M')} {tz.key}"
+        )
+    return result

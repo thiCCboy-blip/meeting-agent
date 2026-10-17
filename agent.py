@@ -34,7 +34,7 @@ import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
-from calendar_store import book_slot, check_calendar
+from calendar_store import _home_tz, book_slot, check_calendar, load
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
@@ -49,7 +49,8 @@ TOOLS = [
             "description": (
                 "Look up the calendar for a date range. Returns each day's busy "
                 "events and its list of free 30-minute slot start times (HH:MM). "
-                "Always call this before booking."
+                "Always call this before booking. Times are shown in `timezone` "
+                "(default: the calendar's home timezone)."
             ),
             "parameters": {
                 "type": "object",
@@ -58,6 +59,13 @@ TOOLS = [
                     "end_date": {
                         "type": "string",
                         "description": "Last day, YYYY-MM-DD (inclusive)",
+                    },
+                    "timezone": {
+                        "type": "string",
+                        "description": (
+                            "IANA timezone to display times in, e.g. 'Asia/Kolkata'. "
+                            "Defaults to the calendar's home timezone."
+                        ),
                     },
                 },
                 "required": ["start_date", "end_date"],
@@ -71,7 +79,8 @@ TOOLS = [
             "description": (
                 "Book a meeting. The slot must be on a working day (Mon-Fri, "
                 "09:00-17:00) and must not overlap any existing event -- "
-                "overlapping bookings are rejected."
+                "overlapping bookings are rejected. `date`/`start` are interpreted "
+                "in `timezone` (default: the calendar's home timezone)."
             ),
             "parameters": {
                 "type": "object",
@@ -84,6 +93,13 @@ TOOLS = [
                         "description": "Meeting length in minutes (default 30)",
                     },
                     "title": {"type": "string", "description": "Optional meeting title"},
+                    "timezone": {
+                        "type": "string",
+                        "description": (
+                            "IANA timezone that `date`/`start` are expressed in, e.g. "
+                            "'America/New_York'. Defaults to the calendar's home timezone."
+                        ),
+                    },
                 },
                 "required": ["person", "date", "start"],
             },
@@ -96,9 +112,12 @@ DISPATCH = {"check_calendar": check_calendar, "book_slot": book_slot}
 
 def system_prompt() -> str:
     today = date.today()
+    home_tz = _home_tz(load()).key
     return (
         "You are a scheduling assistant that books meetings by calling tools.\n"
-        f"Today is {today.isoformat()} ({today.strftime('%A')}).\n\n"
+        f"Today is {today.isoformat()} ({today.strftime('%A')}).\n"
+        f"The calendar's home timezone is {home_tz}; all times are in that zone "
+        "unless the user names a different one.\n\n"
         "Rules:\n"
         "1. ALWAYS call check_calendar before book_slot so you book a genuinely free slot.\n"
         "2. NEVER double-book. Only ask for a slot that check_calendar reported as free. "
@@ -107,7 +126,10 @@ def system_prompt() -> str:
         'such as "not Monday" or a preferred time of day.\n'
         "4. Working days are Mon-Fri, working hours 09:00-17:00, slots are 30 minutes.\n"
         '5. Resolve relative dates (e.g. "next week") into concrete dates from today.\n'
-        "6. Finish with a short confirmation: who, weekday, date, and time. If the request "
+        '6. If the user mentions a timezone (e.g. "my 6pm" in IST), pass that IANA '
+        "name as the `timezone` argument to the tools so times are interpreted and "
+        "reported in their zone.\n"
+        "7. Finish with a short confirmation: who, weekday, date, and time. If the request "
         "cannot be met, say why and propose the closest alternative.\n"
     )
 

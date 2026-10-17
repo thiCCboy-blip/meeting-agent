@@ -1,6 +1,9 @@
 """Generate a sample calendar.json seeded on next week's weekdays.
 
-Dates are computed relative to today, so the demo never goes stale.
+Dates are computed relative to today, so the demo never goes stale. The
+calendar's home timezone defaults to UTC; override it with CALENDAR_TZ, e.g.
+``CALENDAR_TZ=Asia/Kolkata python seed_calendar.py``.
+
 Usage: python seed_calendar.py [--path calendar.json]
 """
 
@@ -8,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -22,13 +26,15 @@ SEED = [
     (4, "Team", "15:00", "16:00", "Retro"),
 ]
 
+DEFAULT_TZ = "UTC"
+
 
 def next_monday(today: date | None = None) -> date:
     today = today or date.today()
     return today + timedelta(days=(7 - today.weekday()) % 7 or 7)
 
 
-def sample_calendar(today: date | None = None) -> dict:
+def sample_calendar(today: date | None = None, timezone: str = DEFAULT_TZ) -> dict:
     monday = next_monday(today)
     events = []
     for index, (offset, person, start, end, title) in enumerate(SEED, 1):
@@ -45,7 +51,7 @@ def sample_calendar(today: date | None = None) -> dict:
         )
     return {
         "owner": "you",
-        "timezone": "local",
+        "timezone": timezone,
         "working_hours": {"start": "09:00", "end": "17:00"},
         "slot_minutes": 30,
         "events": events,
@@ -55,11 +61,12 @@ def sample_calendar(today: date | None = None) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Seed the sample calendar.")
     parser.add_argument("--path", default=str(BASE_DIR / "calendar.json"))
+    parser.add_argument("--timezone", default=os.environ.get("CALENDAR_TZ", DEFAULT_TZ))
     args = parser.parse_args(argv)
 
-    data = sample_calendar()
+    data = sample_calendar(timezone=args.timezone)
     Path(args.path).write_text(json.dumps(data, indent=2), encoding="utf-8")
-    print(f"Wrote {len(data['events'])} events to {args.path}")
+    print(f"Wrote {len(data['events'])} events to {args.path} (timezone={data['timezone']})")
     return 0
 
 

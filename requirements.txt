@@ -1,3 +1,8 @@
 # The agent and tools use only the Python standard library.
-# Nothing is required to run it. pytest is only needed for the test suite.
+# The one exception is the IANA timezone database: Linux/macOS include it with
+# the OS, but Windows does not, so install tzdata there for timezone support.
+tzdata>=2024.1; platform_system == "Windows"
+
+# pytest and ruff are only needed for the test suite / linting.
 pytest>=7.0
+ruff>=0.6

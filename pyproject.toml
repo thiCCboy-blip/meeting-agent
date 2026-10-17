@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "Tool-using agent that books meetings from plain-English requests."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    # ZoneInfo needs a timezone database. Linux/macOS ship one with the OS;
+    # Windows does not, so pull the IANA data as a package there.
+    "tzdata>=2024.1; platform_system == 'Windows'",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.6"]

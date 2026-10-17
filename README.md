@@ -6,12 +6,14 @@ A tool-using agent that books meetings from plain-English requests against a
 fake calendar stored in `calendar.json`. It exposes two tools to the model and
 enforces a hard **never-double-book** rule in code.
 
-- `check_calendar(start_date, end_date)` — busy events and free 30-min slots per day
-- `book_slot(person, date, start, duration_minutes=30, title=None)` — books a slot,
-  **rejecting any overlap** with an existing event
+- `check_calendar(start_date, end_date, timezone=None)` — busy events and free
+  30-min slots per day, rendered in `timezone` (default: the calendar's home zone)
+- `book_slot(person, date, start, duration_minutes=30, title=None, timezone=None)` —
+  books a slot, **rejecting any overlap** with an existing event
 
-The agent and tools use only the Python standard library. It runs on any
-OpenAI-compatible chat API and defaults to a **free** provider (Groq).
+The agent and tools use only the Python standard library (plus the `tzdata`
+package on Windows for timezone support). It runs on any OpenAI-compatible chat
+API and defaults to a **free** provider (Groq).
 
 ## What makes this different
 
@@ -26,6 +28,11 @@ double-book. Here the guarantee is **race-safe**, not just prompt-level:
   *same* slot and assert exactly one winner.
 - **Agent behaviour is tested** — with a mocked chat API, the loop is shown to
   inspect the calendar before booking and to fail safe when it tries to double-book.
+- **Timezone-aware scheduling** — times are IANA zones (`zoneinfo`). The calendar
+  has a home timezone that defines its working hours; a request can be expressed in
+  another zone and is stored as the home wall-clock. Overlaps are compared as
+  absolute instants, so a 09:00 slot in New York correctly collides with 13:00 UTC
+  in summer and 14:00 UTC in winter (DST handled by the tz database).
 
 > **Resume line:** Built a race-safe, tool-using meeting agent that books from
 > plain-English requests — zero double-bookings, holding under concurrent bookings ·
@@ -59,10 +66,15 @@ Other commands:
 python agent.py                     # interactive prompt
 python agent.py --show-calendar     # print the next two weeks
 python seed_calendar.py             # (re)generate the sample calendar.json
+CALENDAR_TZ=Asia/Kolkata python seed_calendar.py   # set the calendar's home timezone
 python -m pytest                    # run the test suite
 python -m ruff check .              # lint  (pip install ruff)
 python -m ruff format --check .     # formatting
 ```
+
+> Windows note: the IANA timezone database is not bundled with the OS. Install it
+> with `pip install tzdata` (or `pip install -e .`, which pulls it in) — timezone
+> calls fail otherwise. Linux and macOS include it.
 
 ## Configuration (`.env` or environment variables)
 
@@ -72,6 +84,7 @@ python -m ruff format --check .     # formatting
 | `OPENAI_MODEL` | `llama-3.3-70b-versatile` | any tool-calling model |
 | `OPENAI_BASE_URL` | `https://api.groq.com/openai/v1` | point at another provider |
 | `OPENAI_REASONING_EFFORT` | _(unset)_ | set `none` for OpenAI reasoning models (e.g. `gpt-6-luna`) that reject tool calls otherwise |
+| `CALENDAR_TZ` | `UTC` | home timezone used by `seed_calendar.py` (IANA name) |
 
 **Free providers** — just set `OPENAI_BASE_URL` + `OPENAI_MODEL` (see `.env.example`):
 Groq (`llama-3.3-70b-versatile`), OpenRouter free models, or Google Gemini.
@@ -95,14 +108,17 @@ committed or shared, rotate it.
    confirmation. It stops after `MAX_STEPS` to avoid runaway loops.
 
 Working days are Mon-Fri, working hours 09:00-17:00, slots are 30 minutes.
-`seed_calendar.py` writes the sample events relative to *today*, so the demo
-never goes stale.
+Working hours are validated in the calendar's **home timezone** (the `timezone`
+field in `calendar.json`, `UTC` by default). Pass a `timezone` (IANA name) to a
+tool to express or view times in another zone; bookings are stored as the home
+wall-clock. `seed_calendar.py` writes the sample events relative to *today*, so
+the demo never goes stale.
 
 ## Tests
 
 ```
 $ python -m pytest
-14 passed
+21 passed
 ```
 
 - `tests/test_calendar_store.py` — the double-book rule (identical and partial
@@ -114,11 +130,15 @@ $ python -m pytest
 - `tests/test_concurrency.py` — the race-safety guarantee: 24 threads and 8
   separate OS processes all race for one slot; exactly one wins, and no lock or
   temp files are left behind.
+- `tests/test_timezone.py` — cross-timezone overlaps are blocked, bookings made
+  in one zone are stored in the calendar's home zone, invalid zones are reported,
+  and DST offsets are correct.
 
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and
-`pytest` on every push and pull request, across Python 3.10-3.13.
+`pytest` on every push and pull request, across Python 3.10-3.13 on **both
+Ubuntu and Windows**.
 
 > The workflow lives inside this project so it moves with it if `meeting-agent`
 > is published as its own repository. If it stays a subfolder of a larger repo,

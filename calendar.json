@@ -1,6 +1,6 @@
 {
   "owner": "you",
-  "timezone": "local",
+  "timezone": "UTC",
   "working_hours": {
     "start": "09:00",
     "end": "17:00"
